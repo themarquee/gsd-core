@@ -11,6 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('node:child_process');
 const { isSemverNewer } = require('../gsd-core/bin/lib/semver-compare.cjs');
 // Latest-version lookup is delegated to the single deterministic adapter
 // (#498). checkLatestVersion() owns the npm-view call, the timeout/semver
@@ -94,10 +95,37 @@ try {
   if (lv && lv.ok) latest = lv.version;
 } catch (e) {}
 
+// Age gate: only flag update_available if the latest version has been published
+// for at least MIN_AGE_DAYS. Protects against immediately applying brand-new
+// releases that may be malicious, broken, or untested.
+const MIN_AGE_DAYS = 3;
+let latestAgeOk = false;
+let latestAgeDays = null;
+if (latest) {
+  try {
+    const timeOutput = execFileSync(
+      'npm', ['view', PACKAGE_NAME, 'time', '--json'],
+      { encoding: 'utf8', timeout: 10000, windowsHide: true, shell: process.platform === 'win32' }
+    );
+    const times = JSON.parse(timeOutput);
+    const publishedAt = times[latest];
+    if (publishedAt) {
+      latestAgeDays = (Date.now() - new Date(publishedAt).getTime()) / 86400000;
+      latestAgeOk = latestAgeDays >= MIN_AGE_DAYS;
+    }
+  } catch (e) {}
+}
+
+const updateIsAvailable = !!(latest && isSemverNewer(latest, installed));
+const blockedByAgeGate = updateIsAvailable && !latestAgeOk;
+
 const result = {
-  update_available: latest && isSemverNewer(latest, installed),
+  update_available: updateIsAvailable && latestAgeOk,
+  update_blocked_age_gate: blockedByAgeGate || undefined,
   installed,
   latest: latest || 'unknown',
+  latest_age_days: latestAgeDays !== null ? Math.floor(latestAgeDays) : undefined,
+  min_age_days: MIN_AGE_DAYS,
   checked: Math.floor(Date.now() / 1000),
   stale_hooks: staleHooks.length > 0 ? staleHooks : undefined,
   package_name: PACKAGE_NAME,
